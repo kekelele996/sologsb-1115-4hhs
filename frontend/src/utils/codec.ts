@@ -44,6 +44,84 @@ export function allocateSpecimenCode(
   return code
 }
 
+/** 采集地改代码时，卡住无法迁移的编号 */
+export interface CodeRenameBlocked {
+  /** 旧标本编号 */
+  code: string
+  /** 迁移后应得到的新编号；旧编号拆不出年份/流水号时为空 */
+  newCode?: string
+  /** 卡住原因 */
+  reason: string
+}
+
+/** 采集地代码变更的迁移计划 */
+export interface SiteCodeRenamePlan {
+  /** 待更新标本：标本 id → 新编号（年份与流水号保持不变） */
+  updates: { id: string; code: string }[]
+  /** 卡住的旧编号：旧编号无法解析，或新编号与其他标本重复 */
+  blocked: CodeRenameBlocked[]
+}
+
+/**
+ * 规划采集地代码变更后、该采集地已有标本编号的迁移：
+ * 仅替换编号的采集地代码前缀，保留原年份与流水号。
+ * - 旧编号拆不出「代码-年份-流水号」→ 整条列入 blocked
+ * - 新编号与其他采集地标本冲突，或本批次迁移后互相撞号 → 整条列入 blocked
+ * 调用方应在 blocked 非空时放弃整笔保存（采集地与标本都不改动）。
+ */
+export function planSiteCodeRename(
+  siteId: string,
+  nextSiteCode: string,
+  allSpecimens: Specimen[]
+): SiteCodeRenamePlan {
+  const prefix = nextSiteCode.trim().toUpperCase()
+  const targets = allSpecimens.filter((item) => item.siteId === siteId)
+  const targetIds = new Set(targets.map((item) => item.id))
+
+  // 先逐条解析旧编号，拆不出年份/流水号的直接卡住
+  const mapped = new Map<string, { oldCode: string; newCode: string }>()
+  const blocked: CodeRenameBlocked[] = []
+  for (const specimen of targets) {
+    const parsed = parseSpecimenCode(specimen.code)
+    if (!parsed) {
+      blocked.push({ code: specimen.code, reason: '旧编号拆不出年份和流水号' })
+      continue
+    }
+    const newCode = buildSpecimenCode(prefix, parsed.year, parsed.serial)
+    mapped.set(specimen.id, { oldCode: specimen.code, newCode })
+  }
+
+  // 迁移集合之外的既有编号（大写归一后比较）
+  const codesOutside = new Set(
+    allSpecimens.filter((item) => !targetIds.has(item.id)).map((item) => item.code.trim().toUpperCase())
+  )
+  // 同一新编号被几条目标标本占用（迁移集合内部撞号）
+  const ownersOfNewCode = new Map<string, string[]>()
+  for (const [id, item] of mapped) {
+    const key = item.newCode.toUpperCase()
+    ownersOfNewCode.set(key, [...(ownersOfNewCode.get(key) ?? []), id])
+  }
+
+  const updates: { id: string; code: string }[] = []
+  for (const [id, item] of mapped) {
+    const key = item.newCode.toUpperCase()
+    const clashOutside = codesOutside.has(key)
+    const clashInside = (ownersOfNewCode.get(key) ?? []).length > 1
+    if (clashOutside || clashInside) {
+      blocked.push({
+        code: item.oldCode,
+        newCode: item.newCode,
+        reason: clashOutside ? '新编号与其他标本编号重复' : '新编号与本采集地另一条标本迁移后重复'
+      })
+      continue
+    }
+    updates.push({ id, code: item.newCode })
+  }
+
+  blocked.sort((a, b) => a.code.localeCompare(b.code, 'zh-Hans-CN'))
+  return { updates, blocked }
+}
+
 /** 经纬度格式化：116.4042°E, 39.9136°N */
 export function formatLatLng(longitude: number, latitude: number): string {
   const lon = `${Math.abs(longitude).toFixed(4)}°${longitude >= 0 ? 'E' : 'W'}`

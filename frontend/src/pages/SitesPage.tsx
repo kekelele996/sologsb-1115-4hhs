@@ -5,6 +5,7 @@ import { usePersistentStore } from '@/hooks/usePersistentStore'
 import { siteStore } from '@/stores/siteStore'
 import { specimenStore } from '@/stores/specimenStore'
 import { formatLatLng, validateLatLng } from '@/utils/codec'
+import type { CodeRenameBlocked } from '@/utils/codec'
 import { uid } from '@/utils/id'
 
 interface SiteForm {
@@ -44,8 +45,12 @@ export default function SitesPage(): JSX.Element {
   const [form, setForm] = useState<SiteForm>(EMPTY_FORM)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  /** 改代码时卡住、未做任何改动的标本编号清单 */
+  const [blocked, setBlocked] = useState<CodeRenameBlocked[]>([])
 
-  const patch = (next: Partial<SiteForm>): void => setForm((prev) => ({ ...prev, ...next }))
+  const patch = (next: Partial<SiteForm>): void => {
+    setForm((prev) => ({ ...prev, ...next }))
+  }
 
   const countOf = (siteId: string): number => specimens.filter((item) => item.siteId === siteId).length
 
@@ -59,6 +64,7 @@ export default function SitesPage(): JSX.Element {
   }, [form.longitude, form.latitude, form.id, sites])
 
   const submit = async (): Promise<void> => {
+    setBlocked([])
     const longitude = Number(form.longitude)
     const latitude = Number(form.latitude)
     if (!form.code.trim() || !form.name.trim()) {
@@ -72,6 +78,7 @@ export default function SitesPage(): JSX.Element {
     }
     if (sites.some((site) => site.code.toUpperCase() === form.code.trim().toUpperCase() && site.id !== form.id)) {
       setError(`采集地代码「${form.code}」已存在，请换一个（标本编号依赖它）`)
+      setBlocked([])
       return
     }
     setError('')
@@ -89,8 +96,26 @@ export default function SitesPage(): JSX.Element {
       dateStart: form.dateStart,
       dateEnd: form.dateEnd
     }
-    await siteStore.getState().save(row)
-    setMessage(form.id ? `采集地「${row.name}」已更新` : `采集地「${row.name}」已建立`)
+    const result = await siteStore.getState().save(row)
+    if (result.blocked.length > 0) {
+      // 采集地代码与全部标本编号均保持原样，表单保留以便调整
+      setBlocked(result.blocked)
+      setError(`代码未保存：${result.blocked.length} 个旧编号无法迁移，原采集地与标本均未改动`)
+      setMessage('')
+      return
+    }
+    setBlocked([])
+    if (result.migrated > 0) {
+      // 刷新标本内存镜像，使清单、卡片与导出立即显示新编号
+      await specimenStore.getState().hydrate()
+      setMessage(
+        form.id
+          ? `采集地「${row.name}」已更新，${result.migrated} 份已有标本编号同步迁移为新前缀（年份与流水号不变）`
+          : `采集地「${row.name}」已建立`
+      )
+    } else {
+      setMessage(form.id ? `采集地「${row.name}」已更新` : `采集地「${row.name}」已建立`)
+    }
     setForm(EMPTY_FORM)
   }
 
@@ -110,6 +135,7 @@ export default function SitesPage(): JSX.Element {
       dateEnd: site.dateEnd
     })
     setError('')
+    setBlocked([])
   }
 
   const remove = async (site: CollectSite): Promise<void> => {
@@ -146,6 +172,7 @@ export default function SitesPage(): JSX.Element {
         <div>
           <span className="field-label">采集地代码（用于标本编号前缀）</span>
           <input className="field-input" value={form.code} onChange={(e) => patch({ code: e.target.value })} placeholder="如 QLB" />
+          <p className="mt-1 text-[11px] text-slate-400">编辑已有代码会同步迁移该采集地全部旧编号，保留原年份与流水号</p>
         </div>
         <div>
           <span className="field-label">采集地名称</span>
@@ -211,13 +238,31 @@ export default function SitesPage(): JSX.Element {
         ) : null}
 
         {error ? <p className="text-sm text-rose-600 md:col-span-3">{error}</p> : null}
+        {blocked.length > 0 ? (
+          <div className="rounded-lg border border-rose-300 bg-rose-50 p-3 text-sm text-rose-800 md:col-span-3" data-testid="rename-blocked">
+            <p className="font-medium">以下 {blocked.length} 个编号卡住，请先人工处理后再改代码：</p>
+            <ul className="mt-1 list-disc space-y-1 pl-5">
+              {blocked.map((item) => (
+                <li key={item.code} className="font-mono text-xs">
+                  {item.code}
+                  {item.newCode ? <span> → {item.newCode}</span> : null}
+                  <span className="font-sans">（{item.reason}）</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {message ? <p className="text-sm text-field-700 md:col-span-3">{message}</p> : null}
 
         <div className="flex gap-2 md:col-span-3">
           <button className="btn-primary" type="button" onClick={() => void submit()}>
             {form.id ? '保存修改' : '新增采集地'}
           </button>
-          <button className="btn-ghost" type="button" onClick={() => { setForm(EMPTY_FORM); setError('') }}>
+          <button
+            className="btn-ghost"
+            type="button"
+            onClick={() => { setForm(EMPTY_FORM); setError(''); setBlocked([]) }}
+          >
             清空表单
           </button>
         </div>
