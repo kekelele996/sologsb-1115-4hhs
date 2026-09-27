@@ -37,6 +37,12 @@ const EMPTY_FORM: SiteForm = {
   dateEnd: new Date().toISOString().slice(0, 10)
 }
 
+/** 代码变更导致编号迁移被卡住的明细 */
+interface BlockedMigration {
+  unparsable: string[]
+  conflicts: string[]
+}
+
 /** 采集地管理：坐标格式校验 + 50 米内邻近采集地提示与合并 */
 export default function SitesPage(): JSX.Element {
   const sites = usePersistentStore(siteStore, (state) => state.rows)
@@ -44,6 +50,7 @@ export default function SitesPage(): JSX.Element {
   const [form, setForm] = useState<SiteForm>(EMPTY_FORM)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const [blocked, setBlocked] = useState<BlockedMigration | null>(null)
 
   const patch = (next: Partial<SiteForm>): void => setForm((prev) => ({ ...prev, ...next }))
 
@@ -59,6 +66,7 @@ export default function SitesPage(): JSX.Element {
   }, [form.longitude, form.latitude, form.id, sites])
 
   const submit = async (): Promise<void> => {
+    setBlocked(null)
     const longitude = Number(form.longitude)
     const latitude = Number(form.latitude)
     if (!form.code.trim() || !form.name.trim()) {
@@ -89,8 +97,22 @@ export default function SitesPage(): JSX.Element {
       dateStart: form.dateStart,
       dateEnd: form.dateEnd
     }
-    await siteStore.getState().save(row)
-    setMessage(form.id ? `采集地「${row.name}」已更新` : `采集地「${row.name}」已建立`)
+    const result = await siteStore.getState().save(row)
+    if (!result.ok) {
+      setBlocked({ unparsable: result.unparsable, conflicts: result.conflicts })
+      setMessage('')
+      return
+    }
+    setBlocked(null)
+    if (result.migrated > 0) {
+      // 刷新标本内存镜像，使清单、鉴定、入柜与导出立即显示新编号
+      await specimenStore.getState().hydrate()
+      setMessage(
+        `采集地「${row.name}」代码已更新，并同步迁移 ${result.migrated} 份标本的编号（保留原年份与流水号）`
+      )
+    } else {
+      setMessage(form.id ? `采集地「${row.name}」已更新` : `采集地「${row.name}」已建立`)
+    }
     setForm(EMPTY_FORM)
   }
 
@@ -110,6 +132,7 @@ export default function SitesPage(): JSX.Element {
       dateEnd: site.dateEnd
     })
     setError('')
+    setBlocked(null)
   }
 
   const remove = async (site: CollectSite): Promise<void> => {
@@ -139,13 +162,22 @@ export default function SitesPage(): JSX.Element {
         <h1 className="page-title">采集地管理</h1>
         <p className="page-sub">
           坐标输入带经纬度格式校验；同坐标 50 米内的记录会提示合并为同一采集地，合并时标本会自动改挂。
+          修改采集地代码保存时，会把该采集地已有标本编号一并迁移（保留年份与流水号）；遇到编号无法解析或与其他标本重复则整体不动并列出卡住的编号。
         </p>
       </header>
 
       <section className="panel grid gap-3 md:grid-cols-3">
         <div>
           <span className="field-label">采集地代码（用于标本编号前缀）</span>
-          <input className="field-input" value={form.code} onChange={(e) => patch({ code: e.target.value })} placeholder="如 QLB" />
+          <input
+            className="field-input"
+            value={form.code}
+            onChange={(e) => {
+              patch({ code: e.target.value })
+              setBlocked(null)
+            }}
+            placeholder="如 QLB"
+          />
         </div>
         <div>
           <span className="field-label">采集地名称</span>
@@ -210,6 +242,28 @@ export default function SitesPage(): JSX.Element {
           </div>
         ) : null}
 
+        {blocked ? (
+          <div
+            data-testid="migration-blocked"
+            className="rounded-lg border border-rose-300 bg-rose-50 p-3 text-sm text-rose-800 md:col-span-3"
+          >
+            <p className="font-medium">编号迁移被卡住，采集地和全部标本均未改动：</p>
+            {blocked.unparsable.length > 0 ? (
+              <p className="mt-1">
+                以下旧编号拆不出年份和流水号，需先人工修正标本编号：
+                <span className="ml-1 font-mono">{blocked.unparsable.join('、')}</span>
+              </p>
+            ) : null}
+            {blocked.conflicts.length > 0 ? (
+              <p className="mt-1">
+                以下新编号与其他标本重复：
+                <span className="ml-1 font-mono">{blocked.conflicts.join('、')}</span>
+              </p>
+            ) : null}
+            <p className="mt-1 text-xs text-rose-600">请处理上述编号后再保存；其他采集地及其标本不受影响。</p>
+          </div>
+        ) : null}
+
         {error ? <p className="text-sm text-rose-600 md:col-span-3">{error}</p> : null}
         {message ? <p className="text-sm text-field-700 md:col-span-3">{message}</p> : null}
 
@@ -217,7 +271,15 @@ export default function SitesPage(): JSX.Element {
           <button className="btn-primary" type="button" onClick={() => void submit()}>
             {form.id ? '保存修改' : '新增采集地'}
           </button>
-          <button className="btn-ghost" type="button" onClick={() => { setForm(EMPTY_FORM); setError('') }}>
+          <button
+            className="btn-ghost"
+            type="button"
+            onClick={() => {
+              setForm(EMPTY_FORM)
+              setError('')
+              setBlocked(null)
+            }}
+          >
             清空表单
           </button>
         </div>

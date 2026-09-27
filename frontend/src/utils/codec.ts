@@ -44,6 +44,50 @@ export function allocateSpecimenCode(
   return code
 }
 
+/** 采集地代码变更后的编号迁移计划 */
+export interface CodeMigrationPlan {
+  /** 可安全迁移的标本：保留原年份与流水号，仅替换代码前缀 */
+  updates: { specimen: Specimen; nextCode: string }[]
+  /** 旧编号无法解析出年份和流水号的标本编号 */
+  unparsable: string[]
+  /** 新编号与其他标本（或本采集地内部）重复的编号 */
+  conflicts: string[]
+}
+
+/**
+ * 规划采集地代码变更后，挂在该采集地（siteId）下标本的编号迁移：
+ * - 只影响该采集地已有标本，其他采集地的标本不动
+ * - 新编号 = 新代码 + 旧编号中的年份 + 旧编号中的流水号
+ * - 旧编号拆不出年份/流水号、或新编号与其他标本重复时记入对应列表；
+ *   只要存在任一卡住项，调用方就应放弃整个保存（采集地与标本都不改）
+ */
+export function planCodeMigration(specimens: Specimen[], siteId: string, newSiteCode: string): CodeMigrationPlan {
+  const mine = specimens.filter((item) => item.siteId === siteId)
+  const otherCodes = specimens.filter((item) => item.siteId !== siteId).map((item) => item.code)
+
+  const updates: CodeMigrationPlan['updates'] = []
+  const unparsable: string[] = []
+  const conflicts: string[] = []
+  const claimed: string[] = []
+
+  for (const specimen of mine) {
+    const parsed = parseSpecimenCode(specimen.code)
+    if (!parsed) {
+      unparsable.push(specimen.code)
+      continue
+    }
+    const nextCode = buildSpecimenCode(newSiteCode, parsed.year, parsed.serial)
+    if (isDuplicateCode(nextCode, otherCodes) || isDuplicateCode(nextCode, claimed)) {
+      conflicts.push(nextCode)
+      continue
+    }
+    claimed.push(nextCode)
+    updates.push({ specimen, nextCode })
+  }
+
+  return { updates, unparsable, conflicts }
+}
+
 /** 经纬度格式化：116.4042°E, 39.9136°N */
 export function formatLatLng(longitude: number, latitude: number): string {
   const lon = `${Math.abs(longitude).toFixed(4)}°${longitude >= 0 ? 'E' : 'W'}`
